@@ -1,0 +1,45 @@
+name: Buzón cifrado de gastos
+on:
+  schedule:
+    - cron: "17 9 * * *"   # todos los días 06:17 hora de Córdoba
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: "Desde (AAAA-MM-DD). Vacío = últimos 15 días"
+        required: false
+        default: ""
+      hasta:
+        description: "Hasta (AAAA-MM-DD). Vacío = hoy"
+        required: false
+        default: ""
+permissions:
+  contents: write
+jobs:
+  buzon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet cryptography
+      - name: Traer de Mercado Pago (solo lectura) y cifrar
+        env:
+          MP_ACCESS_TOKEN: ${{ secrets.MP_ACCESS_TOKEN }}
+          CLAVE_BUZON: ${{ secrets.CLAVE_BUZON }}
+          RANGO_DESDE: ${{ inputs.desde }}
+          RANGO_HASTA: ${{ inputs.hasta }}
+        run: |
+          # Los gastos sin cifrar quedan fuera del repositorio y se borran al terminar
+          mkdir -p "$RUNNER_TEMP/mp" && cd "$RUNNER_TEMP/mp"
+          python "$GITHUB_WORKSPACE/scripts/mp_sync.py" > /dev/null
+          cd "$GITHUB_WORKSPACE"
+          python scripts/cifrar.py "$RUNNER_TEMP/mp/data/movimientos.json" data/buzon.json
+          rm -rf "$RUNNER_TEMP/mp"
+      - name: Guardar el buzón cifrado
+        run: |
+          git config user.name "finanzas-buzon"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/buzon.json
+          git diff --cached --quiet || git commit -m "Buzón $(date -u +%F)"
+          git push
