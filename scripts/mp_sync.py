@@ -107,17 +107,28 @@ def main():
         if r.get("status") not in ("approved", "authorized"):
             continue  # rechazados, cancelados o devueltos: la plata no salió
         col = str((r.get("collector") or {}).get("id") or "")
-        if col == me:
-            continue
+        bi = ((r.get("point_of_interaction") or {}).get("transaction_data") or {}).get("bank_info") or {}
+        titular = (bi.get("collector") or {}).get("account_holder_name")
+        a_otro_banco = r.get("operation_type") == "money_transfer" and bool(titular)
+        if col == me and not a_otro_banco:
+            continue  # movimientos entre tus propias cuentas
         if not (float(r.get("transaction_amount") or 0) > 0):
             continue  # pagos de $0 (validación de tarjeta, cupón que cubre todo): no salió plata
         kind = KIND.get(r.get("operation_type"), "otro")
-        bi = ((r.get("point_of_interaction") or {}).get("transaction_data") or {}).get("bank_info") or {}
-        titular = (bi.get("collector") or {}).get("account_holder_name")
+        td = r.get("transaction_details") or {}
+        # 1) el monto es lo que pagaste de verdad (con el recargo de la tarjeta, si hubo)
+        precio = float(r.get("transaction_amount") or 0)
+        pagado = float(td.get("total_paid_amount") or 0)
+        monto = pagado if pagado > precio else precio
         g = {"src": "mp", "mpId": str(r["id"]), "date": r["date_created"],
-             "amount": r["transaction_amount"], "currency": r.get("currency_id", "ARS"),
+             "amount": monto, "precio": precio, "currency": r.get("currency_id", "ARS"),
              "kind": kind, "estado": "pendiente", "medio": "Mercado Pago"}
-        if kind == "transferencia":
+        if a_otro_banco and col == me:
+            g["contactKey"] = "t_" + re.sub(r"[^a-z0-9]+", "-", titular.lower()).strip("-")[:60]
+            g["title"] = titular
+            g["titleSource"] = "titular"
+            g["viaCuentaPropia"] = True  # transferencia a otro banco: no se vuelve a traer del reporte
+        elif kind == "transferencia":
             if col and col not in apodos_mp:
                 try:
                     apodos_mp[col] = get("/users/" + col).get("nickname") or ""
@@ -138,7 +149,6 @@ def main():
         except (TypeError, ValueError):
             pass
         # Con qué se pagó y si fue en cuotas (para tarjetas de crédito)
-        td = r.get("transaction_details") or {}
         g["pagoTipo"] = r.get("payment_type_id") or ""      # credit_card, debit_card, account_money...
         g["pagoMetodo"] = r.get("payment_method_id") or ""  # visa, master, naranja...
         if g["pagoTipo"] == "credit_card":
@@ -155,7 +165,8 @@ def main():
             g["nota"] = "Pago autorizado, todavía no acreditado"
         gastos.append(g)
     # Lo que no figura como pago: transferencias a otros bancos y otras salidas de dinero
-    ids = {g["mpId"] for g in gastos} | {str(r["id"]) for r in pagos}
+    ids = {g["mpId"] for g in gastos}
+    propias = [g for g in gastos if g.get("viaCuentaPropia")]
     if RANGO_DESDE:
         ini_utc = datetime.fromisoformat(RANGO_DESDE + "T00:00:00-03:00").astimezone(timezone.utc)
         fin_utc = (datetime.fromisoformat(RANGO_HASTA + "T23:59:59-03:00").astimezone(timezone.utc)
@@ -174,6 +185,10 @@ def main():
     for s in salen:
         if s["id"] in ids:
             continue  # ya vino como pago
+        if s["desc"] == "payout" and any(
+                abs(float(g["amount"]) - s["monto"]) <= 1 or abs(float(g["precio"]) - s["monto"]) <= 1
+                for g in propias if g["date"][:10] in (s["fecha"][:10],)):
+            continue  # la salida al otro banco de una transferencia que ya está cargada
         mid = ("po_" if s["desc"] == "payout" else "rr_") + s["id"]
         if mid in ids:
             continue
