@@ -109,6 +109,8 @@ def main():
         col = str((r.get("collector") or {}).get("id") or "")
         if col == me:
             continue
+        if not (float(r.get("transaction_amount") or 0) > 0):
+            continue  # pagos de $0 (validación de tarjeta, cupón que cubre todo): no salió plata
         kind = KIND.get(r.get("operation_type"), "otro")
         bi = ((r.get("point_of_interaction") or {}).get("transaction_data") or {}).get("bank_info") or {}
         titular = (bi.get("collector") or {}).get("account_holder_name")
@@ -135,6 +137,20 @@ def main():
                 g["lat"], g["lng"] = round(lat, 6), round(lng, 6)  # ubicación del comercio (pagos con QR)
         except (TypeError, ValueError):
             pass
+        # Con qué se pagó y si fue en cuotas (para tarjetas de crédito)
+        td = r.get("transaction_details") or {}
+        g["pagoTipo"] = r.get("payment_type_id") or ""      # credit_card, debit_card, account_money...
+        g["pagoMetodo"] = r.get("payment_method_id") or ""  # visa, master, naranja...
+        if g["pagoTipo"] == "credit_card":
+            g["cuotas"] = int(r.get("installments") or 1)
+            if td.get("installment_amount"):
+                g["cuotaMonto"] = td["installment_amount"]
+            if td.get("total_paid_amount"):
+                g["totalPagado"] = td["total_paid_amount"]  # incluye el interés de las cuotas, si hay
+            fin = sum(float(f.get("amount") or 0) for f in (r.get("fee_details") or [])
+                      if f.get("type") == "financing_fee")
+            if fin:
+                g["interes"] = round(fin, 2)
         if r.get("status") == "authorized":
             g["nota"] = "Pago autorizado, todavía no acreditado"
         gastos.append(g)
@@ -169,6 +185,7 @@ def main():
                        "title": DESC_SALIDA.get(s["desc"], "Salida de dinero (" + (s["desc"] or "otro") + ")"),
                        "titleSource": "banco" if es_banco else "reporte",
                        **({} if es_banco else {"nota": "Movimiento de salida del reporte de Mercado Pago"})})
+    gastos = [g for g in gastos if float(g.get("amount") or 0) > 0]  # nunca gastos de $0
     if not RANGO_DESDE:  # en un pedido manual se respeta el rango elegido
         gastos = [g for g in gastos if g["date"][:10] >= DESDE]
     ahora = datetime.now(timezone.utc).isoformat()
